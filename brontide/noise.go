@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -44,6 +46,9 @@ const (
 	// the remote party fails to deliver the proper payload within this
 	// time frame, then we'll fail the connection.
 	handshakeReadTimeout = time.Second * 5
+
+	// file path for dump secret key.
+	dumpKeyFile = "/home/nakano/.lnd/keys.log"
 )
 
 var (
@@ -734,6 +739,18 @@ func (b *Machine) WriteMessage(p []byte) error {
 	// Finally, generate the encrypted packet itself.
 	b.nextBodySend = b.sendCipher.Encrypt(nil, nil, p)
 
+	var cip = b.sendCipher
+	//cipherLen := b.sendCipher.Encrypt(nil, nil, pktLen[:])
+	dumpSecretKey(b.nextHeaderSend[2:], cip.secretKey[:])
+
+	/*if cip.nonce == 0 {
+		err := dumpSecretKey(cipherLen[2:], cip.secretKey[:])
+		if err != nil {
+			// error
+			fmt.Printf("error save enckey: %v\n", err)
+		}
+	}*/
+
 	return nil
 }
 
@@ -770,6 +787,8 @@ func (b *Machine) Flush(w io.Writer) (int, error) {
 		// slice depending on the number of actual bytes written.
 		n, err := w.Write(b.nextBodySend)
 		b.nextBodySend = b.nextBodySend[n:]
+		//var cip = b.sendCipher
+		//dumpSecretKey(b.nextBodySend[2:], cip.secretKey[:])
 
 		// If we partially or fully wrote any of the body's MAC, we'll
 		// subtract that contribution from the total amount flushed to
@@ -840,6 +859,7 @@ func (b *Machine) ReadHeader(r io.Reader) (uint32, error) {
 	}
 
 	// Attempt to decrypt+auth the packet length present in the stream.
+	var cip = b.recvCipher
 	pktLenBytes, err := b.recvCipher.Decrypt(
 		nil, nil, b.nextCipherHeader[:],
 	)
@@ -847,8 +867,18 @@ func (b *Machine) ReadHeader(r io.Reader) (uint32, error) {
 		return 0, err
 	}
 
+	/*if cip.nonce == 0 {
+		err := dumpSecretKey(b.nextCipherHeader[2:], cip.secretKey[:])
+		if err != nil {
+			// error
+			fmt.Printf("error save deckey: %v\n", err)
+		}
+	}*/
+
 	// Compute the packet length that we will need to read off the wire.
 	pktLen := uint32(binary.BigEndian.Uint16(pktLenBytes)) + macSize
+
+	dumpSecretKey(b.nextCipherHeader[2:], cip.secretKey[:])
 
 	return pktLen, nil
 }
@@ -861,6 +891,17 @@ func (b *Machine) ReadBody(r io.Reader, buf []byte) ([]byte, error) {
 	// Next, using the length read from the packet header, read the
 	// encrypted packet itself into the buffer allocated by the read
 	// pool.
+
+	var cip = b.recvCipher
+	/*if cip.nonce == 0 {
+		err := dumpSecretKey(b.nextCipherHeader[2:], cip.secretKey[:])
+		if err != nil {
+			// error
+			fmt.Printf("error save deckey: %v\n", err)
+		}
+	}*/
+	dumpSecretKey(b.nextCipherHeader[2:], cip.secretKey[:])
+
 	_, err := io.ReadFull(r, buf)
 	if err != nil {
 		return nil, err
@@ -870,4 +911,25 @@ func (b *Machine) ReadBody(r io.Reader, buf []byte) ([]byte, error) {
 	// new byte slice containing the plaintext.
 	// TODO(roasbeef): modify to let pass in slice
 	return b.recvCipher.Decrypt(nil, nil, buf)
+}
+
+// dump secret key and length mac for lightning-dissector.
+func dumpSecretKey(lengthMac []byte, secret []byte) error {
+	fname, _ := filepath.Abs(dumpKeyFile)
+	file, err := os.OpenFile(fname, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		// error
+		return err
+	}
+	if file != nil {
+		defer func() {
+			err := file.Close()
+			if err != nil {
+				fmt.Printf("dump file close error: %v\n", err)
+			}
+		}()
+		_, err := fmt.Fprintf(file, "%x %x\n", lengthMac, secret)
+		return err
+	}
+	return nil
 }
